@@ -1,0 +1,2 @@
+class MoveParsingError(Exception):
+    pass

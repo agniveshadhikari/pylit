@@ -1,6 +1,7 @@
 from ..utils import split
 from ..cards import Card, SemiSuit, deck
 from .move import Action, Move, MoveType
+from .errors import *
 
 from enum import Enum
 from collections import defaultdict
@@ -22,9 +23,11 @@ class Game:
         self.num_players = num_players
 
         self.semisuit_states: Dict[SemiSuit, SemiSuitState] = defaultdict(
-            lambda: SemiSuitState.active)
-        self.player_hands: List[List[Card]] = list(split(
-            deck.random_permutation(), num_players))
+            lambda: SemiSuitState.active
+        )
+        self.player_hands: List[List[Card]] = list(
+            split(deck.random_permutation(), num_players)
+        )
 
         self.turn: int = 0
         self.actions = []
@@ -33,7 +36,7 @@ class Game:
     # Team belongingness methods
 
     def team(self, player: int):
-        return 0 if player < self.num_players//2 else 1
+        return 0 if player < self.num_players // 2 else 1
 
     def same_team(self, player_a, player_b):
         return self.team(player_a) == self.team(player_b)
@@ -59,29 +62,36 @@ class Game:
     # Move/Action methods
 
     def ensure_legal(self, action: Action):
-
         def ensure_target_player_not_dead():
             if not self.player_has_cards(action.move.player):
-                raise Exception(
-                    f"Player {action.player} can not play dead player {action.move.player}")
+                raise TargetPlayerDeadError(
+                    source_player=action.player, target_player=action.move.player
+                )
 
         if self.turn != action.player:
-            raise Exception(f"Not player {action.player}'s turn.")
+            raise OutOfTurnError(source_player=action.player)
 
         if action.move_type == MoveType.ask:
             ensure_target_player_not_dead()
             if not action.move.card in nbrs(*self.player_hands[action.player]):
-                raise Exception(
-                    f"Player {action.player} can not ask for {action.move.card}")
+                raise IllegalAskError(source_player=action.player, ask=action.move.card)
+
             if self.same_team(action.move.player, action.player):
-                raise Exception(
-                    f"Player {action.player} can not ask from teammate player {action.move.player}")
+                raise TargetPlayerSameTeamError(
+                    source_player=action.player, target_player=action.move.player
+                )
 
         if action.move_type == MoveType.gift:
             ensure_target_player_not_dead()
+
+            # The last action must be a declare action
+            if self.actions[-1].move.type != MoveType.declare:
+                raise IllegalGiftError(source_player=action.player)
+
             if not self.same_team(action.player, action.move.player):
-                raise Exception(
-                    f"Player {action.player} can not gift opponent player {action.move.player}")
+                raise TargetPlayerOpponentTeamError(
+                    source_player=action.player, target_player=action.move.player
+                )
 
         if action.move_type == MoveType.declare:
             # Ensure card_player_map contains the cards from the semi-suit.
@@ -90,25 +100,24 @@ class Game:
 
             unmapped_cards = semisuit_cards - mapped_cards
             extra_mapped_cards = mapped_cards - semisuit_cards
+            opponent_cards = map(
+                lambda card_player_pair: card_player_pair[0],
+                filter(
+                    lambda card_player_pair: not self.same_team(
+                        card_player_pair[1], action.player
+                    ),
+                    action.move.card_player_map.items(),
+                ),
+            )
 
-            if len(unmapped_cards) > 0 or len(extra_mapped_cards) > 0:
-                unmapped_cards_error = "unmapped cards {" + \
-                    ", ".join(unmapped_cards) + "}"
-                extra_mapped_cards_error = "extra mapped cards {" + ", ".join(
-                    extra_mapped_cards) + "}"
-                mapping_errors = " and ".join(
-                    [unmapped_cards_error, extra_mapped_cards_error])
-                raise Exception(
-                    f"Player {action.player} played invalid declare for {action.move.semisuit}, with {mapping_errors}")
-
-            # Ensure opponent players' cards are not being declared.
-            for player in action.move.card_player_map.values():
-                if not self.same_team(action.player, player):
-                    raise Exception(
-                        f"Player {action.player} can not declare cards of opponent player {action.move.player}")
+            raise IllegalDeclareError(
+                source_player=action.player,
+                extra_cards=extra_mapped_cards,
+                missing_cards=unmapped_cards,
+                opponent_cards=opponent_cards,
+            )
 
     def action(self, action: Action):
-
         self.ensure_legal(action)
         self.actions.append(action)
 
@@ -123,32 +132,35 @@ class Game:
     # Private methods
 
     def _ask_action(self, action: Action):
-
         if action.move.card in self.player_hand(action.move.player):
-            self._move_card(action.move.card,
-                            action.move.player, action.player)
+            self._move_card(action.move.card, action.move.player, action.player)
 
         else:
             self.turn = action.move.player
 
     def _gift_action(self, action: Action):
-
         self.turn = action.move.player
 
     def _declare_action(self, action: Action):
-        if not all([self.player_has(player, card) for card, player in action.move.card_player_map.items()]):
+        if not all(
+            [
+                self.player_has(player, card)
+                for card, player in action.move.card_player_map.items()
+            ]
+        ):
             self.scores[self.team(action.player)] -= 1
 
             for card in Card.get_semisuit(action.move.semisuit):
                 card_player = self.card_loc(card)
                 if card_player is None:
-                    break
+                    raise RuntimeError("Internal state error: couldn't find {card}")
                 if not self.same_team(action.player, card_player):
                     self.turn = card_player
 
         else:
             self.scores[self.team(action.player)] += 1
 
+        # Correct declare move or not, the cards get disposed.
         for card, player in action.move.card_player_map.items():
             self.player_hands[player].remove(card)
 
@@ -163,4 +175,6 @@ class Game:
 
 
 def nbrs(*cards: List[Card]):
-    return set([related_card for card in cards for related_card in [card.next, card.prev]])
+    return set(
+        [related_card for card in cards for related_card in [card.next, card.prev]]
+    )
